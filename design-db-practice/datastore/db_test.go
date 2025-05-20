@@ -1,6 +1,8 @@
 package datastore
 
 import (
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -81,4 +83,43 @@ func TestDb(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestSegmentSplitting(t *testing.T) {
+	tmp := t.TempDir()
+
+	origSize := maxSegmentSize
+	maxSegmentSize = 50
+	defer func() { maxSegmentSize = origSize }()
+
+	db, err := Open(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	keys := []string{"a", "b", "c", "d", "e", "f", "g"}
+	for _, k := range keys {
+		if err := db.Put(k, strings.Repeat("x", 30)); err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	files, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("cannot read dir: %v", err)
+	}
+
+	var segments int
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), "segment-") && strings.HasSuffix(f.Name(), ".db") {
+			segments++
+		}
+	}
+
+	if segments < 2 {
+		t.Errorf("Expected multiple segments, got %d", segments)
+	}
 }
