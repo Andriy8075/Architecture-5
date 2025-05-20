@@ -14,7 +14,7 @@ import (
 
 const segmentFileFormat = "segment-%06d.db"
 
-var maxSegmentSize int64 = 10 * 1024 * 1024
+var maxSegmentSize int64 = 10
 
 var ErrNotFound = fmt.Errorf("record does not exist")
 
@@ -137,6 +137,18 @@ func (db *Db) Put(key, value string) error {
 		if err := db.openCurrentSegment(); err != nil {
 			return err
 		}
+
+		// Якщо сегментів стало більше ніж 3 — злиття
+		files, _ := os.ReadDir(db.dir)
+		count := 0
+		for _, f := range files {
+			if strings.HasPrefix(f.Name(), "segment-") && strings.HasSuffix(f.Name(), ".db") {
+				count++
+			}
+		}
+		if count > 3 {
+			_ = db.MergeSegments()
+		}
 	}
 
 	n, err := db.currentFile.Write(data)
@@ -193,4 +205,109 @@ func (db *Db) Size() (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+func (db *Db) MergeSegments() error {
+	tmpPath := filepath.Join(db.dir, "merged.tmp")
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	writer := bufio.NewWriter(tmpFile)
+
+	latest := make(map[string]string)
+
+	entries, err := os.ReadDir(db.dir)
+	if err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+
+	var segmentFiles []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "segment-") && strings.HasSuffix(entry.Name(), ".db") {
+			segmentFiles = append(segmentFiles, filepath.Join(db.dir, entry.Name()))
+		}
+	}
+	sort.Strings(segmentFiles) // гарантований порядок
+
+	for _, path := range segmentFiles {
+		f, err := os.Open(path)
+		if err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			return err
+		}
+		r := bufio.NewReader(f)
+		for {
+			var e entry
+			_, err := e.DecodeFromReader(r)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				f.Close()
+				tmpFile.Close()
+				os.Remove(tmpPath)
+				return err
+			}
+			latest[e.key] = e.value
+		}
+		f.Close()
+	}
+
+	var offset int64
+	newIndex := make(hashIndex)
+
+	for key, value := range latest {
+		e := entry{key: key, value: value}
+		data := e.Encode()
+		if _, err := writer.Write(data); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			return err
+		}
+		newIndex[key] = recordLocation{
+			segmentID: 0,
+			offset:    offset,
+		}
+		offset += int64(len(data))
+	}
+
+	if err := writer.Flush(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	// Закрити старий файл
+	if db.currentFile != nil {
+		db.currentFile.Close()
+	}
+
+	// Видалити старі сегменти
+	for _, path := range segmentFiles {
+		os.Remove(path)
+	}
+
+	// Перейменувати тимчасовий файл у новий сегмент
+	finalPath := filepath.Join(db.dir, fmt.Sprintf(segmentFileFormat, 0))
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return err
+	}
+
+	// Відкрити його як поточний
+	db.currentID = 0
+	db.index = newIndex
+	return db.openCurrentSegment()
 }

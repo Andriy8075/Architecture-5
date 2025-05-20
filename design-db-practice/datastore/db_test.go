@@ -123,3 +123,71 @@ func TestSegmentSplitting(t *testing.T) {
 		t.Errorf("Expected multiple segments, got %d", segments)
 	}
 }
+
+func TestMergeSegments(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	maxSegmentSize = 50
+
+	db, err := Open(tmpDir)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	for i := 0; i < 10; i++ {
+		key := "key" + string(rune('A'+i))
+		value := "value" + string(rune('A'+i))
+		err := db.Put(key, value)
+		if err != nil {
+			t.Fatalf("Put failed: %v", err)
+		}
+	}
+
+	files, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segCount := 0
+	for _, f := range files {
+		if f.Name()[0:7] == "segment" {
+			segCount++
+		}
+	}
+	if segCount < 2 {
+		t.Fatalf("Expected more than 1 segment, we have : %d", segCount)
+	}
+
+	// Виклик злиття
+	err = db.MergeSegments()
+	if err != nil {
+		t.Fatalf("MergeSegments failed: %v", err)
+	}
+
+	// Перевір, що залишився лише один сегмент
+	files, err = os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segCount = 0
+	for _, f := range files {
+		if f.Name()[0:7] == "segment" {
+			segCount++
+		}
+	}
+	if segCount != 1 {
+		t.Fatalf("After merging have more than 1 segment, we have: %d", segCount)
+	}
+
+	for i := 0; i < 10; i++ {
+		key := "key" + string(rune('A'+i))
+		want := "value" + string(rune('A'+i))
+		got, err := db.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%s) failed: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("Get(%s) = %s, want %s", key, got, want)
+		}
+	}
+}
