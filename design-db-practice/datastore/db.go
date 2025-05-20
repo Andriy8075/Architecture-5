@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const segmentFileFormat = "segment-%06d.db"
@@ -31,19 +32,87 @@ type Db struct {
 	currentOffset int64
 	currentID     int
 	index         hashIndex
+
+	indexMutex sync.RWMutex
+	putChan    chan entryWithAck
+	wg         sync.WaitGroup
+	closeChan  chan struct{}
+	closeOnce  sync.Once
 }
 
 func Open(dir string) (*Db, error) {
 	db := &Db{
-		dir:   dir,
-		index: make(hashIndex),
+		dir:       dir,
+		index:     make(hashIndex),
+		putChan:   make(chan entryWithAck, 100),
+		closeChan: make(chan struct{}),
 	}
 
 	if err := db.loadSegments(); err != nil {
 		return nil, err
 	}
+	db.wg.Add(1)
+	go db.writeLoop()
 
 	return db, nil
+}
+
+func (db *Db) writeLoop() {
+	defer db.wg.Done()
+
+	for {
+		select {
+		case eAck, ok := <-db.putChan:
+			if !ok {
+				return
+			}
+			err := db.writeEntry(eAck.entry)
+			eAck.ack <- err
+		case <-db.closeChan:
+			return
+		}
+	}
+}
+
+func (db *Db) writeEntry(e entry) error {
+	data := e.Encode()
+
+	// Якщо файл переповнюється — відкриваємо новий сегмент
+	if db.currentOffset+int64(len(data)) > maxSegmentSize {
+		if err := db.currentFile.Close(); err != nil {
+			return err
+		}
+		db.currentID++
+		if err := db.openCurrentSegment(); err != nil {
+			return err
+		}
+
+		files, _ := os.ReadDir(db.dir)
+		count := 0
+		for _, f := range files {
+			if strings.HasPrefix(f.Name(), "segment-") && strings.HasSuffix(f.Name(), ".db") {
+				count++
+			}
+		}
+		if count > 3 {
+			_ = db.MergeSegments()
+		}
+	}
+
+	n, err := db.currentFile.Write(data)
+	if err != nil {
+		return err
+	}
+
+	db.indexMutex.Lock()
+	db.index[e.key] = recordLocation{
+		segmentID: db.currentID,
+		offset:    db.currentOffset,
+	}
+	db.indexMutex.Unlock()
+
+	db.currentOffset += int64(n)
+	return nil
 }
 
 func (db *Db) loadSegments() error {
@@ -117,59 +186,45 @@ func (db *Db) openCurrentSegment() error {
 }
 
 func (db *Db) Close() error {
-	if db.currentFile != nil {
-		return db.currentFile.Close()
-	}
-	return nil
+	var err error
+	db.closeOnce.Do(func() {
+		close(db.putChan)
+		db.wg.Wait()
+		if db.currentFile != nil {
+			err = db.currentFile.Close()
+		}
+	})
+	return err
+}
+
+type entryWithAck struct {
+	entry entry
+	ack   chan error
 }
 
 func (db *Db) Put(key, value string) error {
-	e := entry{key: key, value: value}
-	data := e.Encode()
-
-	if db.currentOffset+int64(len(data)) > maxSegmentSize {
-		// Закрити поточний файл
-		if err := db.currentFile.Close(); err != nil {
-			return err
-		}
-		db.currentID++
-		// Відкрити новий сегмент
-		if err := db.openCurrentSegment(); err != nil {
-			return err
-		}
-
-		// Якщо сегментів стало більше ніж 3 — злиття
-		files, _ := os.ReadDir(db.dir)
-		count := 0
-		for _, f := range files {
-			if strings.HasPrefix(f.Name(), "segment-") && strings.HasSuffix(f.Name(), ".db") {
-				count++
-			}
-		}
-		if count > 3 {
-			_ = db.MergeSegments()
-		}
+	ack := make(chan error)
+	e := entryWithAck{
+		entry: entry{key: key, value: value},
+		ack:   ack,
 	}
 
-	n, err := db.currentFile.Write(data)
-	if err != nil {
-		return err
+	select {
+	case db.putChan <- e:
+		return <-ack
+	case <-db.closeChan:
+		return fmt.Errorf("database is closed")
 	}
-
-	db.index[key] = recordLocation{
-		segmentID: db.currentID,
-		offset:    db.currentOffset,
-	}
-
-	db.currentOffset += int64(n)
-	return nil
 }
 
 func (db *Db) Get(key string) (string, error) {
+	db.indexMutex.RLock()
 	loc, ok := db.index[key]
+	db.indexMutex.RUnlock()
 	if !ok {
 		return "", ErrNotFound
 	}
+
 	filePath := filepath.Join(db.dir, fmt.Sprintf(segmentFileFormat, loc.segmentID))
 	f, err := os.Open(filePath)
 	if err != nil {
