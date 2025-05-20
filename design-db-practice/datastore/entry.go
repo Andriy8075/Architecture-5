@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"bufio"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 type entry struct {
 	key, value string
+	hash       [20]byte
 }
 
 // 0           4    8     kl+8  kl+12     <-- offset
@@ -18,19 +20,24 @@ type entry struct {
 
 func (e *entry) Encode() []byte {
 	kl, vl := len(e.key), len(e.value)
-	size := kl + vl + 12
+	e.hash = sha1.Sum([]byte(e.key + e.value))
+	size := kl + vl + 12 + len(e.hash)
 	res := make([]byte, size)
 	binary.LittleEndian.PutUint32(res, uint32(size))
 	binary.LittleEndian.PutUint32(res[4:], uint32(kl))
 	copy(res[8:], e.key)
 	binary.LittleEndian.PutUint32(res[kl+8:], uint32(vl))
 	copy(res[kl+12:], e.value)
+	copy(res[kl+12+vl:], e.hash[:])
 	return res
 }
 
 func (e *entry) Decode(input []byte) {
-	e.key = decodeString(input[4:])
-	e.value = decodeString(input[len(e.key)+8:])
+	kl := int(binary.LittleEndian.Uint32(input[4:8]))
+	vl := int(binary.LittleEndian.Uint32(input[kl+8 : kl+12]))
+	e.key = string(input[8 : 8+kl])
+	e.value = string(input[kl+12 : kl+12+vl])
+	copy(e.hash[:], input[len(input)-20:])
 }
 
 func decodeString(v []byte) string {
@@ -55,4 +62,8 @@ func (e *entry) DecodeFromReader(in *bufio.Reader) (int, error) {
 	}
 	e.Decode(buf)
 	return n, nil
+}
+
+func (e *entry) EncodeHash() [20]byte {
+	return sha1.Sum([]byte(e.key + e.value))
 }

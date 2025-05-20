@@ -7,39 +7,62 @@ import (
 )
 
 func TestEntry_Encode(t *testing.T) {
-	e := entry{"key", "value"}
-	e.Decode(e.Encode())
-	if e.key != "key" {
+	original := entry{
+		key:   "key",
+		value: "value",
+	}
+
+	encoded := original.Encode()
+
+	var decoded entry
+	decoded.Decode(encoded)
+
+	if decoded.key != original.key {
 		t.Error("incorrect key")
 	}
-	if e.value != "value" {
+	if decoded.value != original.value {
 		t.Error("incorrect value")
+	}
+	if decoded.hash != original.hash {
+		t.Error("hash mismatch")
 	}
 }
 
 func TestReadValue(t *testing.T) {
-	var (
-		a, b entry
-	)
-	a = entry{"key", "test-value"}
-	originalBytes := a.Encode()
+	original := entry{"key", "test-value", [20]byte{}}
 
-	b.Decode(originalBytes)
-	t.Log("encode/decode", a, b)
-	if a != b {
-		t.Error("Encode/Decode mismatch")
+	encoded := original.Encode()
+
+	var decoded entry
+	decoded.Decode(encoded)
+
+	if decoded.key != original.key {
+		t.Error("key mismatch")
+	}
+	if decoded.value != original.value {
+		t.Error("value mismatch")
+	}
+	if decoded.hash != original.hash {
+		t.Error("hash mismatch")
 	}
 
-	b = entry{}
-	n, err := b.DecodeFromReader(bufio.NewReader(bytes.NewReader(originalBytes)))
+	decoded2 := entry{}
+	n, err := decoded2.DecodeFromReader(bufio.NewReader(bytes.NewReader(encoded)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log("encode/decodeFromReader", a, b)
-	if a != b {
-		t.Error("Encode/DecodeFromReader mismatch")
+
+	if decoded2.key != original.key {
+		t.Error("key mismatch (DecodeFromReader)")
 	}
-	if n != len(originalBytes) {
-		t.Errorf("DecodeFromReader() read %d bytes, expected %d", n, len(originalBytes))
+	if decoded2.value != original.value {
+		t.Error("value mismatch (DecodeFromReader)")
+	}
+	if decoded2.hash != original.hash {
+		t.Error("hash mismatch (DecodeFromReader)")
+	}
+
+	if n != len(encoded) {
+		t.Errorf("DecodeFromReader() read %d bytes, expected %d", n, len(encoded))
 	}
 }

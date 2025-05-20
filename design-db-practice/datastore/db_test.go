@@ -127,7 +127,7 @@ func TestSegmentSplitting(t *testing.T) {
 func TestMergeSegments(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	maxSegmentSize = 50
+	maxSegmentSize = 20
 
 	db, err := Open(tmpDir)
 	if err != nil {
@@ -157,14 +157,12 @@ func TestMergeSegments(t *testing.T) {
 	if segCount < 2 {
 		t.Fatalf("Expected more than 1 segment, we have : %d", segCount)
 	}
-
-	// Виклик злиття
+	
 	err = db.MergeSegments()
 	if err != nil {
 		t.Fatalf("MergeSegments failed: %v", err)
 	}
 
-	// Перевір, що залишився лише один сегмент
 	files, err = os.ReadDir(tmpDir)
 	if err != nil {
 		t.Fatal(err)

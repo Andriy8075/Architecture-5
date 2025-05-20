@@ -77,7 +77,6 @@ func (db *Db) writeLoop() {
 func (db *Db) writeEntry(e entry) error {
 	data := e.Encode()
 
-	// Якщо файл переповнюється — відкриваємо новий сегмент
 	if db.currentOffset+int64(len(data)) > maxSegmentSize {
 		if err := db.currentFile.Close(); err != nil {
 			return err
@@ -241,6 +240,12 @@ func (db *Db) Get(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	h := e.EncodeHash()
+	if h != e.hash {
+		return "", fmt.Errorf("data corrupted: hash mismatch")
+	}
+
 	return e.value, nil
 }
 
@@ -285,7 +290,7 @@ func (db *Db) MergeSegments() error {
 			segmentFiles = append(segmentFiles, filepath.Join(db.dir, entry.Name()))
 		}
 	}
-	sort.Strings(segmentFiles) // гарантований порядок
+	sort.Strings(segmentFiles)
 
 	for _, path := range segmentFiles {
 		f, err := os.Open(path)
@@ -345,23 +350,19 @@ func (db *Db) MergeSegments() error {
 		return err
 	}
 
-	// Закрити старий файл
 	if db.currentFile != nil {
 		db.currentFile.Close()
 	}
 
-	// Видалити старі сегменти
 	for _, path := range segmentFiles {
 		os.Remove(path)
 	}
 
-	// Перейменувати тимчасовий файл у новий сегмент
 	finalPath := filepath.Join(db.dir, fmt.Sprintf(segmentFileFormat, 0))
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return err
 	}
 
-	// Відкрити його як поточний
 	db.currentID = 0
 	db.index = newIndex
 	return db.openCurrentSegment()
