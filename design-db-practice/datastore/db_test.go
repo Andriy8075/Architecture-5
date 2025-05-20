@@ -89,7 +89,7 @@ func TestSegmentSplitting(t *testing.T) {
 	tmp := t.TempDir()
 
 	origSize := maxSegmentSize
-	maxSegmentSize = 50
+	maxSegmentSize = 7
 	defer func() { maxSegmentSize = origSize }()
 
 	db, err := Open(tmp)
