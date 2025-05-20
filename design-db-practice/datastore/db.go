@@ -7,110 +7,190 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 )
 
-const outFileName = "current-data"
+const segmentFileFormat = "segment-%06d.db"
+
+const maxSegmentSize = 10 * 1024 * 1024
 
 var ErrNotFound = fmt.Errorf("record does not exist")
 
-type hashIndex map[string]int64
+type recordLocation struct {
+	segmentID int
+	offset    int64
+}
+
+type hashIndex map[string]recordLocation
 
 type Db struct {
-	out       *os.File
-	outOffset int64
-
-	index hashIndex
+	dir           string
+	currentFile   *os.File
+	currentOffset int64
+	currentID     int
+	index         hashIndex
 }
 
 func Open(dir string) (*Db, error) {
-	outputPath := filepath.Join(dir, outFileName)
-	f, err := os.OpenFile(outputPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, err
-	}
 	db := &Db{
-		out:   f,
+		dir:   dir,
 		index: make(hashIndex),
 	}
-	err = db.recover()
-	if err != nil && err != io.EOF {
+
+	if err := db.loadSegments(); err != nil {
 		return nil, err
 	}
+
 	return db, nil
 }
 
-func (db *Db) recover() error {
-	f, err := os.Open(db.out.Name())
+func (db *Db) loadSegments() error {
+	entries, err := os.ReadDir(db.dir)
+	if err != nil {
+		return err
+	}
+
+	var segments []int
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "segment-") && strings.HasSuffix(entry.Name(), ".db") {
+			idStr := strings.TrimSuffix(strings.TrimPrefix(entry.Name(), "segment-"), ".db")
+			id, err := strconv.Atoi(idStr)
+			if err != nil {
+				continue
+			}
+			segments = append(segments, id)
+		}
+	}
+	sort.Ints(segments)
+
+	for _, id := range segments {
+		if err := db.loadSegment(id); err != nil {
+			return err
+		}
+		db.currentID = id
+	}
+
+	return db.openCurrentSegment()
+}
+
+func (db *Db) loadSegment(id int) error {
+	filePath := filepath.Join(db.dir, fmt.Sprintf(segmentFileFormat, id))
+	f, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	in := bufio.NewReader(f)
-	for err == nil {
-		var (
-			record entry
-			n      int
-		)
-		n, err = record.DecodeFromReader(in)
+	reader := bufio.NewReader(f)
+	var offset int64
+	for {
+		var e entry
+		n, err := e.DecodeFromReader(reader)
 		if errors.Is(err, io.EOF) {
-			if n != 0 {
-				return fmt.Errorf("corrupted file")
-			}
 			break
 		}
-
-		db.index[record.key] = db.outOffset
-		db.outOffset += int64(n)
+		if err != nil {
+			return fmt.Errorf("loadSegment error: %w", err)
+		}
+		db.index[e.key] = recordLocation{segmentID: id, offset: offset}
+		offset += int64(n)
 	}
-	return err
+	return nil
+}
+
+func (db *Db) openCurrentSegment() error {
+	path := filepath.Join(db.dir, fmt.Sprintf(segmentFileFormat, db.currentID))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	db.currentFile = f
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	db.currentOffset = info.Size()
+	return nil
 }
 
 func (db *Db) Close() error {
-	return db.out.Close()
-}
-
-func (db *Db) Get(key string) (string, error) {
-	position, ok := db.index[key]
-	if !ok {
-		return "", ErrNotFound
+	if db.currentFile != nil {
+		return db.currentFile.Close()
 	}
-
-	file, err := os.Open(db.out.Name())
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	_, err = file.Seek(position, 0)
-	if err != nil {
-		return "", err
-	}
-
-	var record entry
-	if _, err = record.DecodeFromReader(bufio.NewReader(file)); err != nil {
-		return "", err
-	}
-	return record.value, nil
+	return nil
 }
 
 func (db *Db) Put(key, value string) error {
-	e := entry{
-		key:   key,
-		value: value,
+	e := entry{key: key, value: value}
+	data := e.Encode()
+
+	if db.currentOffset+int64(len(data)) > maxSegmentSize {
+		// Закрити поточний файл
+		if err := db.currentFile.Close(); err != nil {
+			return err
+		}
+		db.currentID++
+		// Відкрити новий сегмент
+		if err := db.openCurrentSegment(); err != nil {
+			return err
+		}
 	}
-	n, err := db.out.Write(e.Encode())
-	if err == nil {
-		db.index[key] = db.outOffset
-		db.outOffset += int64(n)
+
+	n, err := db.currentFile.Write(data)
+	if err != nil {
+		return err
 	}
-	return err
+
+	db.index[key] = recordLocation{
+		segmentID: db.currentID,
+		offset:    db.currentOffset,
+	}
+
+	db.currentOffset += int64(n)
+	return nil
+}
+
+func (db *Db) Get(key string) (string, error) {
+	loc, ok := db.index[key]
+	if !ok {
+		return "", ErrNotFound
+	}
+	filePath := filepath.Join(db.dir, fmt.Sprintf(segmentFileFormat, loc.segmentID))
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	_, err = f.Seek(loc.offset, io.SeekStart)
+	if err != nil {
+		return "", err
+	}
+	var e entry
+	_, err = e.DecodeFromReader(bufio.NewReader(f))
+	if err != nil {
+		return "", err
+	}
+	return e.value, nil
 }
 
 func (db *Db) Size() (int64, error) {
-	info, err := db.out.Stat()
+	var total int64
+	entries, err := os.ReadDir(db.dir)
 	if err != nil {
 		return 0, err
 	}
-	return info.Size(), nil
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "segment-") {
+			info, err := os.Stat(filepath.Join(db.dir, entry.Name()))
+			if err != nil {
+				return 0, err
+			}
+			total += info.Size()
+		}
+	}
+	return total, nil
 }
