@@ -1,38 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/roman-mazur/architecture-practice-4-template/design-db-practice/datastore"
 	"github.com/roman-mazur/architecture-practice-4-template/httptools"
 	"github.com/roman-mazur/architecture-practice-4-template/signal"
 )
 
 var port = flag.Int("port", 8080, "server port")
+var dbHost = flag.String("db-host", "db", "database host address")
 
 const confResponseDelaySec = "CONF_RESPONSE_DELAY_SEC"
 const confHealthFailure = "CONF_HEALTH_FAILURE"
+const teamName = "bebra" // Замініть на ім'я вашої команди
 
 func main() {
 	h := new(http.ServeMux)
 
-	// Initialize database
-	db, err := datastore.Open("/opt/practice-4/db")
-	if err != nil {
-		panic("Failed to open database: " + err.Error())
-	}
-	defer db.Close()
-
-	// Insert initial data with current time
-	currentTime := time.Now().Format(time.RFC3339)
-	if err := db.Put("bebra", currentTime); err != nil {
-		panic("Failed to put initial data: " + err.Error())
-	}
+	// Initialize data in DB
+	initDB()
 
 	h.HandleFunc("/health", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("content-type", "text/plain")
@@ -62,19 +55,21 @@ func main() {
 			return
 		}
 
-		value, err := db.Get(key)
-		if err != nil {
+		resp, err := http.Get(fmt.Sprintf("http://%s:8083/db/%s", *dbHost, key))
+		if err != nil || resp.StatusCode == http.StatusNotFound {
 			rw.WriteHeader(http.StatusNotFound)
-			_, _ = rw.Write([]byte("data not found"))
+			return
+		}
+		defer resp.Body.Close()
+
+		var data map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
 		rw.Header().Set("content-type", "application/json")
-		rw.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(rw).Encode(map[string]string{
-			"key":   key,
-			"value": value,
-		})
+		json.NewEncoder(rw).Encode(data)
 	})
 
 	h.Handle("/report", report)
@@ -82,4 +77,19 @@ func main() {
 	server := httptools.CreateServer(*port, h)
 	server.Start()
 	signal.WaitForTerminationSignal()
+}
+
+func initDB() {
+	currentTime := time.Now().Format("2006-01-02")
+	requestBody, _ := json.Marshal(map[string]string{"value": currentTime})
+
+	resp, err := http.Post(
+		fmt.Sprintf("http://%s:8083/db/%s", *dbHost, teamName),
+		"application/json",
+		bytes.NewBuffer(requestBody),
+	)
+
+	if err != nil || resp.StatusCode != http.StatusOK {
+		panic("Failed to initialize database")
+	}
 }

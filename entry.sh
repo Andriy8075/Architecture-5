@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Create database directory if it doesn't exist
-mkdir -p /opt/practice-4/db
+# For db service only
+if [ "$1" = "db" ]; then
+    mkdir -p /data
+fi
 
 # Check if command exists
 if [ ! -f "/opt/practice-4/$1" ]; then

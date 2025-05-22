@@ -14,6 +14,7 @@ COPY entry.sh /opt/practice-4/
 
 RUN chmod +x /opt/practice-4/entry.sh && \
     chmod +x /opt/practice-4/server && \
+    chmod +x /opt/practice-4/db && \
     apk add --no-cache bash curl
 
 ENTRYPOINT ["/opt/practice-4/entry.sh"]
