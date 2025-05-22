@@ -15,7 +15,7 @@ import (
 
 const segmentFileFormat = "segment-%06d.db"
 
-var maxSegmentSize int64 = 10
+var maxSegmentSize int64 = 10 * 1024 * 1024
 
 var ErrNotFound = fmt.Errorf("record does not exist")
 
