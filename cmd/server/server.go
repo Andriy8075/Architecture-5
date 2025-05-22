@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/roman-mazur/architecture-practice-4-template/design-db-practice/datastore"
 	"github.com/roman-mazur/architecture-practice-4-template/httptools"
 	"github.com/roman-mazur/architecture-practice-4-template/signal"
 )
@@ -19,6 +20,19 @@ const confHealthFailure = "CONF_HEALTH_FAILURE"
 
 func main() {
 	h := new(http.ServeMux)
+
+	// Initialize database
+	db, err := datastore.Open("/opt/practice-4/db")
+	if err != nil {
+		panic("Failed to open database: " + err.Error())
+	}
+	defer db.Close()
+
+	// Insert initial data with current time
+	currentTime := time.Now().Format(time.RFC3339)
+	if err := db.Put("bebra", currentTime); err != nil {
+		panic("Failed to put initial data: " + err.Error())
+	}
 
 	h.HandleFunc("/health", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("content-type", "text/plain")
@@ -41,10 +55,25 @@ func main() {
 
 		report.Process(r)
 
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			rw.WriteHeader(http.StatusBadRequest)
+			_, _ = rw.Write([]byte("key parameter is required"))
+			return
+		}
+
+		value, err := db.Get(key)
+		if err != nil {
+			rw.WriteHeader(http.StatusNotFound)
+			_, _ = rw.Write([]byte("data not found"))
+			return
+		}
+
 		rw.Header().Set("content-type", "application/json")
 		rw.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(rw).Encode([]string{
-			"1", "2",
+		_ = json.NewEncoder(rw).Encode(map[string]string{
+			"key":   key,
+			"value": value,
 		})
 	})
 

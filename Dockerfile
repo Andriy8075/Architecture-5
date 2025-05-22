@@ -12,10 +12,9 @@ WORKDIR /opt/practice-4
 COPY --from=build /go/bin/* /opt/practice-4/
 COPY entry.sh /opt/practice-4/
 
-# Додамо ці команди:
 RUN chmod +x /opt/practice-4/entry.sh && \
     chmod +x /opt/practice-4/server && \
-    apk add --no-cache bash
+    apk add --no-cache bash curl
 
 ENTRYPOINT ["/opt/practice-4/entry.sh"]
 CMD ["server"]
