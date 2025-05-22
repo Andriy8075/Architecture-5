@@ -5,6 +5,18 @@ networks:
     driver: bridge
 
 services:
+  db:
+    build: .
+    command: ["db"]
+    networks:
+      - servers
+    ports:
+      - "8083:8083"
+    volumes:
+      - db_data:/data
+    environment:
+      - DB_PATH=/data
+
   balancer:
     build: .
     command: ["lb", "--trace=true"]
@@ -14,14 +26,15 @@ services:
       - "8090:8090"
     depends_on:
       server1:
-        condition: service_started
+        condition: service_healthy
       server2:
-        condition: service_started
+        condition: service_healthy
       server3:
-        condition: service_started
+        condition: service_healthy
 
   server1:
     build: .
+    command: ["server", "--port=8080", "--db-host=db"]
     environment:
       CONF_HEALTH_FAILURE: "false"
       CONF_RESPONSE_DELAY_SEC: "0"
@@ -35,9 +48,13 @@ services:
       timeout: 1s
       retries: 30
       start_period: 5s
+    depends_on:
+      db:
+        condition: service_started
 
   server2:
     build: .
+    command: ["server", "--port=8080", "--db-host=db"]
     environment:
       CONF_HEALTH_FAILURE: "false"
       CONF_RESPONSE_DELAY_SEC: "0"
@@ -51,9 +68,13 @@ services:
       timeout: 1s
       retries: 30
       start_period: 5s
+    depends_on:
+      db:
+        condition: service_started
 
   server3:
     build: .
+    command: ["server", "--port=8080", "--db-host=db"]
     environment:
       CONF_HEALTH_FAILURE: "false"
       CONF_RESPONSE_DELAY_SEC: "0"
@@ -67,6 +88,9 @@ services:
       timeout: 1s
       retries: 30
       start_period: 5s
+    depends_on:
+      db:
+        condition: service_started
 
   test:
     build:
@@ -76,4 +100,7 @@ services:
       - servers
     depends_on:
       balancer:
-        condition: service_started
+        condition: service_healthy
+
+volumes:
+  db_data:
