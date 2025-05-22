@@ -13,7 +13,7 @@ import (
 const (
 	baseAddress = "http://balancer:8090"
 	dbAddress   = "http://db:8083"
-	teamName    = "bebra" // Замініть на ім'я вашої команди
+	teamName    = "bebra"
 )
 
 var client = http.Client{
