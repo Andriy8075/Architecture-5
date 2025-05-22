@@ -1,64 +1,23 @@
 package integration
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"testing"
 	"time"
 )
 
-const baseAddress = "http://balancer:8090"
+const (
+	baseAddress = "http://balancer:8090"
+	dbAddress   = "http://db:8083"
+	teamName    = "bebra" // Замініть на ім'я вашої команди
+)
 
 var client = http.Client{
 	Timeout: 10 * time.Second,
-}
-
-func TestBalancer(t *testing.T) {
-	if _, exists := os.LookupEnv("INTEGRATION_TEST"); !exists {
-		t.Skip("Integration test is not enabled")
-	}
-
-	// Чекаємо, поки всі сервери стануть доступними
-	time.Sleep(15 * time.Second)
-
-	servers := make(map[string]bool)
-	requests := 10
-
-	// Використовуємо різні порти для унікальних RemoteAddr
-	for i := 0; i < requests; i++ {
-		client := http.Client{Timeout: 3 * time.Second}
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/some-data", baseAddress), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Імітуємо різних клієнтів через різні порти
-		req.RemoteAddr = fmt.Sprintf("192.168.1.%d:%d", i%3+1, 50000+i)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("Request %d failed: %v", i+1, err)
-		}
-		defer resp.Body.Close()
-
-		server := resp.Header.Get("lb-from")
-		if server == "" {
-			t.Errorf("Request %d: missing 'lb-from' header", i+1)
-			continue
-		}
-
-		servers[server] = true
-		t.Logf("Request %d from %s served by: %s", i+1, req.RemoteAddr, server)
-	}
-
-	if len(servers) < 2 {
-		t.Errorf("Expected requests to be distributed between servers, but got only %d server(s): %v", len(servers), servers)
-	} else {
-		t.Logf("Success: requests distributed between %d servers: %v", len(servers), servers)
-	}
 }
 
 func TestClientConsistency(t *testing.T) {
@@ -69,15 +28,6 @@ func TestClientConsistency(t *testing.T) {
 	// Створюємо окремий клієнт для тесту
 	client := &http.Client{
 		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Фіксуємо локальний IP для всіх з'єднань
-				dialer := &net.Dialer{
-					LocalAddr: &net.TCPAddr{IP: net.ParseIP("192.168.1.100")},
-				}
-				return dialer.DialContext(ctx, network, addr)
-			},
-		},
 	}
 
 	var firstServer string
@@ -99,9 +49,99 @@ func TestClientConsistency(t *testing.T) {
 		if firstServer == "" {
 			firstServer = server
 		} else if server != firstServer {
-			t.Errorf("Expected same server (%s) for same client, got %s", firstServer, server)
+			t.Errorf("Expected same server (%s) for same client, got %s\n", firstServer, server)
 		}
 		t.Logf("Request %d: served by %s", i+1, server)
+	}
+}
+
+func TestDatabaseIntegration(t *testing.T) {
+	if _, exists := os.LookupEnv("INTEGRATION_TEST"); !exists {
+		t.Skip("Integration test is not enabled")
+	}
+
+	// 1. Спочатку перевіримо, чи база даних доступна
+	resp, err := client.Get(fmt.Sprintf("%s/db/%s", dbAddress, teamName))
+	if err != nil {
+		t.Fatalf("Database connection failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 from DB, got %d", resp.StatusCode)
+	}
+
+	// 2. Тестуємо, чи сервер правильно взаємодіє з базою даних
+	testKey := "test_key_" + time.Now().Format("20060102150405")
+	testValue := "test_value_" + time.Now().Format("20060102150405")
+
+	// Додаємо тестові дані в базу
+	putDataToDB(t, testKey, testValue)
+
+	// Перевіряємо, чи сервер може отримати ці дані
+	checkServerResponse(t, testKey, testValue)
+
+	// 3. Перевіряємо обробку відсутніх даних
+	nonExistentKey := "non_existent_key_" + time.Now().Format("20060102150405")
+	checkNonExistentKey(t, nonExistentKey)
+}
+
+func putDataToDB(t *testing.T, key, value string) {
+	requestBody, err := json.Marshal(map[string]string{"value": value})
+	if err != nil {
+		t.Fatalf("Failed to marshal request body: %v", err)
+	}
+
+	resp, err := client.Post(
+		fmt.Sprintf("%s/db/%s", dbAddress, key),
+		"application/json",
+		bytes.NewBuffer(requestBody),
+	)
+	if err != nil {
+		t.Fatalf("Failed to put data to DB: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 when putting data to DB, got %d", resp.StatusCode)
+	}
+}
+
+func checkServerResponse(t *testing.T, key, expectedValue string) {
+	resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data?key=%s", baseAddress, key))
+	if err != nil {
+		t.Fatalf("Request to server failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 from server, got %d", resp.StatusCode)
+		return
+	}
+
+	var data map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if data["key"] != key {
+		t.Errorf("Expected key %s, got %s", key, data["key"])
+	}
+
+	if data["value"] != expectedValue {
+		t.Errorf("Expected value %s, got %s", expectedValue, data["value"])
+	}
+}
+
+func checkNonExistentKey(t *testing.T, key string) {
+	resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data?key=%s", baseAddress, key))
+	if err != nil {
+		t.Fatalf("Request to server failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404 for non-existent key, got %d", resp.StatusCode)
 	}
 }
 

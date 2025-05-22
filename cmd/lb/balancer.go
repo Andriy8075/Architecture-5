@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -100,7 +101,6 @@ func health(dst string) bool {
 }
 
 func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
-	// Додамо логування для діагностики
 	log.Printf("Forwarding request from %s to %s", r.RemoteAddr, dst)
 
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
@@ -145,15 +145,12 @@ func selectServerByClientHash(remoteAddr string) (string, error) {
 		return "", fmt.Errorf("no healthy servers available")
 	}
 
-	// Детальне логування для діагностики
-	log.Printf("Selecting server for client: %s (healthy servers: %v)", remoteAddr, servers)
+	// Extract IP from remoteAddr (could be "ip:port" or just "ip")
+	host, _, _ := net.SplitHostPort(remoteAddr)
 
-	hash := hashString(remoteAddr)
+	hash := hashString(host)
 	serverIndex := int(hash) % len(servers)
-	selected := servers[serverIndex]
-
-	log.Printf("Selected server: %s (index: %d)", selected, serverIndex)
-	return selected, nil
+	return servers[serverIndex], nil
 }
 
 func main() {
